@@ -14,6 +14,8 @@ import { logWarn } from "../logger.js";
 import { defaultRuntime } from "../runtime.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
+import type { ChatAttachment } from "./chat-attachments.js";
+import { parseMessageWithAttachments } from "./chat-attachments.js";
 import { sendJson } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import { resolveGatewayRequestContext } from "./http-utils.js";
@@ -35,9 +37,10 @@ type ChatRequest = {
   message_sid?: unknown;
   channel?: unknown;
   provider?: unknown;
+  attachments?: unknown;
 };
 
-const DEFAULT_MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB
+const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB (supports base64 image attachments)
 
 function coerceRequest(val: unknown): ChatRequest {
   if (!val || typeof val !== "object") {
@@ -91,6 +94,23 @@ export async function handleChatHttpRequest(
   const sender = typeof payload.sender === "string" ? payload.sender : undefined;
   const channel = typeof payload.channel === "string" ? payload.channel : "whatsapp";
 
+  // Parse image attachments if provided.
+  const rawAttachments = Array.isArray(payload.attachments)
+    ? (payload.attachments as ChatAttachment[])
+    : undefined;
+  let images: Awaited<ReturnType<typeof parseMessageWithAttachments>>["images"] = [];
+  try {
+    const parsed = await parseMessageWithAttachments(message, rawAttachments, {
+      log: { warn: (msg: string) => logWarn(`chat-http: ${msg}`) },
+    });
+    images = parsed.images;
+  } catch (attErr) {
+    sendJson(res, 400, {
+      error: { message: `Attachment error: ${String(attErr)}`, type: "invalid_request_error" },
+    });
+    return true;
+  }
+
   const { sessionKey, messageChannel } = resolveGatewayRequestContext({
     req,
     model: undefined,
@@ -104,6 +124,7 @@ export async function handleChatHttpRequest(
   const deps = createDefaultDeps();
   const commandInput = {
     message,
+    images: images.length > 0 ? images : undefined,
     sessionKey,
     runId,
     deliver: false as const,
