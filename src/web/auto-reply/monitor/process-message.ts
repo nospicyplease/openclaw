@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolveIdentityNamePrefix } from "../../../agents/identity.js";
 import { resolveChunkMode, resolveTextChunkLimit } from "../../../auto-reply/chunk.js";
 import { shouldComputeCommandAuthorized } from "../../../auto-reply/command-detection.js";
@@ -10,6 +11,7 @@ import {
 import { finalizeInboundContext } from "../../../auto-reply/reply/inbound-context.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../../../auto-reply/reply/provider-dispatcher.js";
 import type { ReplyPayload } from "../../../auto-reply/types.js";
+import type { ImageContent } from "../../../commands/agent/types.js";
 import { toLocationContext } from "../../../channels/location.js";
 import { createReplyPrefixOptions } from "../../../channels/reply-prefix.js";
 import { resolveInboundSessionEnvelopeContext } from "../../../channels/session-envelope.js";
@@ -381,6 +383,24 @@ export async function processMessage(params: {
   });
   trackBackgroundTask(params.backgroundTasks, metaTask);
 
+  // Read inbound image files as base64 content blocks so the model sees
+  // the actual image data, not just a <media:image> placeholder.
+  let inboundImages: ImageContent[] | undefined;
+  if (params.msg.mediaPath && params.msg.mediaType?.startsWith("image/")) {
+    try {
+      const imageData = await readFile(params.msg.mediaPath);
+      inboundImages = [
+        {
+          type: "image",
+          data: imageData.toString("base64"),
+          mimeType: params.msg.mediaType,
+        },
+      ];
+    } catch {
+      logVerbose(`Failed to read inbound image: ${params.msg.mediaPath}`);
+    }
+  }
+
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: params.cfg,
@@ -447,6 +467,7 @@ export async function processMessage(params: {
       // Keep block streaming disabled so final replies are still produced.
       disableBlockStreaming: true,
       onModelSelected,
+      images: inboundImages,
     },
   });
 
